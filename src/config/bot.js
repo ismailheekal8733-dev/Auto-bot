@@ -1,5 +1,18 @@
 import { logger } from '../utils/logger.js';
 
+/*
+ * CHANGES IN THIS VERSION (see chat for full explanation):
+ * 1. getColor() now guards against undefined/null/non-string paths instead of throwing.
+ * 2. getRandomColor() now returns an integer (like getColor()) instead of a raw hex
+ *    string, so it's safe to pass straight into a Discord embed's .setColor().
+ * 3. getBotMessage() now uses a replacer function instead of raw string replace,
+ *    so values containing "$&", "$1" etc. can't corrupt the output.
+ * 4. botConfig is now deep-frozen (Object.freeze) so it can't be accidentally
+ *    mutated from elsewhere in the codebase (config should be read-only at runtime).
+ *    NOTE: the `getCount` functions inside `counters.types` are still callable —
+ *    freezing only blocks reassignment/mutation of data, not calling functions.
+ */
+
 export const botConfig = {
   // =========================
   // BOT PRESENCE (what users see under the bot name)
@@ -410,6 +423,8 @@ export const botConfig = {
     },
     types: {
       // Built-in counter types and how each count is calculated.
+      // NOTE: these functions stay callable even after Object.freeze() below —
+      // freeze only prevents reassigning/mutating data, not invoking functions.
       members: {
         name: "👥 Members",
         description: "Total members in the server",
@@ -527,6 +542,29 @@ if (configErrors.length > 0) {
   }
 }
 
+/**
+ * Recursively freezes an object so config values can't be accidentally
+ * mutated at runtime from elsewhere in the codebase. Functions (like the
+ * `getCount` handlers in `counters.types`) are left callable — freezing
+ * only blocks reassignment of properties, not function invocation.
+ */
+function deepFreeze(obj) {
+  if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) {
+    return obj;
+  }
+
+  for (const key of Object.getOwnPropertyNames(obj)) {
+    const value = obj[key];
+    if (value !== null && (typeof value === "object" || typeof value === "function")) {
+      deepFreeze(value);
+    }
+  }
+
+  return Object.freeze(obj);
+}
+
+deepFreeze(botConfig);
+
 export const BotConfig = botConfig;
 
 const COMMAND_CATEGORY_FEATURE_MAP = {
@@ -576,11 +614,19 @@ export function isMaintenanceMode() {
   return botConfig.commands?.maintenanceMode === true;
 }
 
+/**
+ * Fills {placeholder} tokens in a message template.
+ * Uses a replacer function (not a raw string) so values containing
+ * regex replacement patterns like "$&" or "$1" can't corrupt the output.
+ */
 export function getBotMessage(key, replacements = {}) {
   let message = botConfig.messages?.[key] || key;
 
   for (const [placeholder, value] of Object.entries(replacements)) {
-    message = message.replace(new RegExp(`\\{${placeholder}\\}`, "g"), String(value));
+    message = message.replace(
+      new RegExp(`\\{${placeholder}\\}`, "g"),
+      () => String(value),
+    );
   }
 
   return message;
@@ -621,31 +667,59 @@ export function getDefaultApplicationQuestions() {
   ).filter(Boolean);
 }
 
+/**
+ * Resolves a color from a hex string, a dotted path into
+ * botConfig.embeds.colors (e.g. "ticket.open"), or a raw integer.
+ * Always returns an integer, ready to pass into embed.setColor().
+ * Falls back safely instead of throwing when `path` is missing/invalid.
+ */
 export function getColor(path, fallback = "#99AAB5") {
-  
   if (typeof path === "number") return path;
-  if (typeof path === "string" && path.startsWith("#")) {
-    
+
+  // Guard: anything that isn't a usable string (undefined, null, object...)
+  // falls back instead of crashing on .split() below.
+  if (typeof path !== "string" || path.length === 0) {
+    return getColor(fallback);
+  }
+
+  if (path.startsWith("#")) {
     return parseInt(path.replace("#", ""), 16);
   }
+
   const result = path
     .split(".")
     .reduce(
-      (obj, key) => (obj && obj[key] !== undefined ? obj[key] : fallback),
+      (obj, key) => (obj && obj[key] !== undefined ? obj[key] : undefined),
       botConfig.embeds.colors,
     );
-  
+
+  if (result === undefined) {
+    return getColor(fallback);
+  }
+
   if (typeof result === "string" && result.startsWith("#")) {
     return parseInt(result.replace("#", ""), 16);
   }
-  return result;
+
+  if (typeof result === "number") {
+    return result;
+  }
+
+  // `result` resolved to something that isn't a usable color (e.g. an
+  // object like `priority` itself rather than one of its entries).
+  return getColor(fallback);
 }
 
+/**
+ * Picks a random color from the palette and returns it as an integer,
+ * consistent with getColor() — safe to pass straight into setColor().
+ */
 export function getRandomColor() {
   const colors = Object.values(botConfig.embeds.colors).flatMap((color) =>
     typeof color === "string" ? color : Object.values(color),
   );
-  return colors[Math.floor(Math.random() * colors.length)];
+  const picked = colors[Math.floor(Math.random() * colors.length)];
+  return getColor(picked);
 }
 
 export default botConfig;
